@@ -103,7 +103,7 @@ export async function buildApp() {
     ]);
     return {client:{id,name:request.webClient.name,plan:request.webClient.plan},credits:{balance,transactions},
       keys,usage,recentActivity:activity,errors:activity.filter((x:any)=>typeof x.status_code==="number"&&x.status_code>=400),
-      service:{status:"operational",providers:sourceManagementStatus().map(x=>({provider:x.provider,configured:x.configured,health:x.health.status}))}};
+      service:{status:"api_responding",providers:sourceManagementStatus().map(x=>({provider:x.provider,configured:x.configured,health:x.health.status}))}};
   });
   app.get("/web/providers/health",{preHandler:webClient},async()=>({providers:sourceManagementStatus(),note:"Passive in-process health observations reset on restart; fallback is disabled until an equivalent licensed source is configured."}));
   app.get("/web/account",{preHandler:webClient},async(request:any)=>{const client=request.webClient;return{client,keys:await listKeys(client.id),usage:await usageSummary(client.id),recentActivity:await recentActivity(client.id)};});
