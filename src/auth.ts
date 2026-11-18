@@ -6,7 +6,7 @@ declare module "fastify" { interface FastifyRequest { apiClient:ApiClient|null; 
 
 const minuteBuckets=new Map<string,{start:number,count:number}>();
 const MAX_BUCKETS=20_000;
-function checkClientRate(client:ApiClient){
+export function checkClientRate(client:ApiClient){
  const limit=client.rateLimitPerMinute;if(!limit)return null;
  const now=Date.now(),windowMs=60_000;let b=minuteBuckets.get(client.id);
  if(!b||now-b.start>=windowMs){
