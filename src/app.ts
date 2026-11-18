@@ -221,7 +221,9 @@ export async function buildApp() {
       recordUsage({ clientId: request.apiClient!.id, route: "/v1/products/search", provider: p.provider, timestamp: new Date().toISOString(), cacheHit: Boolean(cached) });
       if (cached) return { ...cached, meta: { cache: "hit" } };
 
-      const result = await provider.search({ query: p.q, page: p.page, country: p.country, currency: p.currency, store: p.store });
+      let result:ProductSearchResult;
+      try { result = await provider.search({ query: p.q, page: p.page, country: p.country, currency: p.currency, store: p.store }); }
+      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       productCache.set(cacheKey, result);
       return { ...result, meta: { cache: "miss" } };
     });
@@ -259,7 +261,9 @@ export async function buildApp() {
       recordUsage({ clientId: request.apiClient!.id, route: "/v1/products/:provider/:externalId", provider: p.provider, timestamp: new Date().toISOString(), cacheHit: Boolean(cached) });
       if (cached) return { ...cached, meta: { cache: "hit" } };
 
-      const product = await provider.getProduct(p.externalId);
+      let product:NormalizedProduct|null;
+      try { product = await provider.getProduct(p.externalId); }
+      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       if (!product) return reply.code(404).send({ error: "not_found" });
       productCache.set(cacheKey, product);
       return { ...product, meta: { cache: "miss" } };
