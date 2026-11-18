@@ -11,6 +11,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { z } from "zod";
 import { config } from "./config.js";
+import { db as awaitableDb } from "./db.js";
 import { requireApiKey, requireScope } from "./auth.js";
 import { productCache } from "./cache.js";
 import { getProvider, providerStatus, recordProviderHealth, sourceManagementStatus } from "./providers/registry.js";
@@ -302,7 +303,7 @@ export async function buildApp() {
 
   app.addHook("onResponse",(request,reply,done)=>{
     if(reply.statusCode>=500){
-      const database=db;
+      const database=(awaitableDb);
       if(database)void database.query("INSERT INTO operational_events(category,outcome,status_code,duration_ms) VALUES('http_error','failure',$1,$2)",[reply.statusCode,Math.max(0,Math.round(reply.elapsedTime))]).catch(()=>{});
     }
     done();
