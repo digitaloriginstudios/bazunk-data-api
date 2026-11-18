@@ -1,0 +1,22 @@
+name: Production readiness smoke check
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'HTTPS API origin to verify (e.g. staging)'
+        required: true
+        type: string
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check liveness and database readiness
+        env:
+          API_URL: ${{ inputs.api_url }}
+        run: |
+          set -euo pipefail
+          case "$API_URL" in https://*) ;; *) echo 'HTTPS URL required'; exit 1;; esac
+          curl --fail --silent --show-error --location-trusted --max-time 15 --retry 2 --retry-delay 2 "$API_URL/health" >/dev/null
+          curl --fail --silent --show-error --max-time 15 --retry 2 --retry-delay 2 "$API_URL/ready" >/dev/null
+          echo 'Liveness and readiness checks passed'
