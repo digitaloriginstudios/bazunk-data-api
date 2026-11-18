@@ -13,7 +13,7 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { requireApiKey, requireScope } from "./auth.js";
 import { productCache } from "./cache.js";
-import { getProvider, providerStatus } from "./providers/registry.js";
+import { getProvider, providerStatus, recordProviderHealth, sourceManagementStatus } from "./providers/registry.js";
 import { providerNames, type ProductSearchResult, type NormalizedProduct } from "./types/product.js";
 import { recordUsage, usageSummary, adminUsageSummary, recentActivity } from "./usage.js";
 import { issueKey, listKeys, revokeKey, listClients, createClient, setClientActive, getOrCreateClerkClient, updateClientAdmin } from "./clients.js";
@@ -96,6 +96,16 @@ export async function buildApp() {
     const rows=await database.query("SELECT product,last_fetched_at FROM product_catalogue WHERE provider=$1 ORDER BY last_fetched_at DESC LIMIT $2",[parsed.data.provider,parsed.data.limit]);
     return {provider:parsed.data.provider,items:rows.rows.map((r:any)=>r.product),source:"cached_catalogue",paidRequestsMade:0};
   });
+  app.get("/web/dashboard",{preHandler:webClient},async(request:any)=>{
+    const id=request.webClient.id;
+    const [balance,transactions,keys,usage,activity]=await Promise.all([
+      getApiCreditBalance(id),listApiCreditLedger(id,10),listKeys(id),usageSummary(id),recentActivity(id,20)
+    ]);
+    return {client:{id,name:request.webClient.name,plan:request.webClient.plan},credits:{balance,transactions},
+      keys,usage,recentActivity:activity,errors:activity.filter((x:any)=>typeof x.status_code==="number"&&x.status_code>=400),
+      service:{status:"api_responding",providers:sourceManagementStatus().map(x=>({provider:x.provider,configured:x.configured,health:x.health.status}))}};
+  });
+  app.get("/web/providers/health",{preHandler:webClient},async()=>({providers:sourceManagementStatus(),note:"Passive in-process health observations reset on restart; fallback is disabled until an equivalent licensed source is configured."}));
   app.get("/web/account",{preHandler:webClient},async(request:any)=>{const client=request.webClient;return{client,keys:await listKeys(client.id),usage:await usageSummary(client.id),recentActivity:await recentActivity(client.id)};});
   app.patch("/web/preferences",{preHandler:webClient},async(request:any,reply)=>{const b=z.object({currency:z.enum(["GBP","USD","EUR","AUD","CAD"])}).safeParse(request.body??{});if(!b.success)return reply.code(400).send({error:"invalid_request"});const database=(await import("./db.js")).db;if(!database)return reply.code(503).send({error:"database_unavailable"});await database.query("UPDATE api_clients SET preferred_currency=$2 WHERE id=$1",[request.webClient.id,b.data.currency]);return{currency:b.data.currency};});
   app.get("/web/admin/aliexpress/connect",{preHandler:internalAdmin},async(request:any,reply)=>{try{return {authorizationUrl:await beginAliExpressAuthorization()};}catch(e){request.log.error(e);return reply.code(503).send({error:"aliexpress_oauth_unavailable"});}});
@@ -223,7 +233,8 @@ export async function buildApp() {
 
       let result:ProductSearchResult;
       try { result = await provider.search({ query: p.q, page: p.page, country: p.country, currency: p.currency, store: p.store }); }
-      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
+      catch(error) {recordProviderHealth(p.provider,false);request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
+      recordProviderHealth(p.provider,true);
       productCache.set(cacheKey, result);
       return { ...result, meta: { cache: "miss" } };
     });
@@ -240,10 +251,11 @@ export async function buildApp() {
       if(!provider.isConfigured()) return reply.code(503).send({error:"provider_unavailable",provider:"amazon"});
       try {
         const product=await provider.getProduct(asin,{country:parsed.data.country});
+        recordProviderHealth("amazon",true);
         if(!product) return reply.code(404).send({error:"not_found"});
         recordUsage({clientId:request.apiClient!.id,route:"/v1/products/lookup",provider:"amazon",timestamp:new Date().toISOString()});
         return product;
-      } catch(error){request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:"amazon"});}
+      } catch(error){recordProviderHealth("amazon",false);request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:"amazon"});}
     });
     v1.get("/products/:provider/:externalId", { preHandler: requireScope("products:read") }, async (request, reply) => {
       const params = z.object({
@@ -265,6 +277,7 @@ export async function buildApp() {
       try { product = await provider.getProduct(p.externalId); }
       catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       if (!product) return reply.code(404).send({ error: "not_found" });
+      recordProviderHealth(p.provider,true);
       productCache.set(cacheKey, product);
       return { ...product, meta: { cache: "miss" } };
     });
