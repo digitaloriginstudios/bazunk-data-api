@@ -16,6 +16,9 @@ export async function requireApiKey(request:FastifyRequest,reply:FastifyReply){
  const supplied=request.headers["x-api-key"];const key=Array.isArray(supplied)?supplied[0]:supplied;
  const client=key?await resolveClient(key):null;request.apiClient=client;
  if(!client)return reply.code(401).send({error:"unauthorized",message:"A valid X-API-Key header is required."});
+ // Internal marketplace traffic uses a dedicated trusted key and is metered separately.
+ // Global abuse protection still applies to all requests.
+ if(client.plan==="internal")return;
  const retryAfter=checkClientRate(client);
  if(retryAfter){reply.header("Retry-After",String(retryAfter));return reply.code(429).send({error:"rate_limit_exceeded",message:"Per-client rate limit exceeded.",limit:client.rateLimitPerMinute,retryAfter});}
  if(client.monthlyQuota!==undefined){
