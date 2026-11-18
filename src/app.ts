@@ -293,7 +293,7 @@ export async function buildApp() {
 
       let product:NormalizedProduct|null;
       try { product = await provider.getProduct(p.externalId); }
-      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
+      catch(error) {recordProviderHealth(p.provider,false);request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       if (!product) return reply.code(404).send({ error: "not_found" });
       recordProviderHealth(p.provider,true);
       productCache.set(cacheKey, product);
