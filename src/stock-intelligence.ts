@@ -14,8 +14,8 @@ export function interpretStock(source:unknown):StockIntelligence {
   const msg=typeof message==="string"?message.trim():null;
   if(exact!==null) return {status:exact===0?"out_of_stock":"in_stock",quantity:exact,quantityKind:"exact",lowerBound:null,message:msg};
   const match=msg?.match(/(?:more than|over)\s+(\d+)\s+(?:available|in stock|left)/i);
-  if(match) return {status:"in_stock",quantity:null,quantityKind:"lower_bound",lowerBound:Number(match[1])+1,message:msg};
-  const unavailable=/(?:out of stock|currently unavailable|sold out)/i.test(msg??"");
+  if(match && Number.isSafeInteger(Number(match[1])) && Number(match[1])<Number.MAX_SAFE_INTEGER) return {status:"in_stock",quantity:null,quantityKind:"lower_bound",lowerBound:Number(match[1])+1,message:msg};
+  const unavailable=/(?:out of stock|currently unavailable|sold out|not available)/i.test(msg??"");
   const available=/(?:in stock|available now)/i.test(msg??"");
   const flag=x.available===true?"in_stock":x.available===false?"out_of_stock":"unknown";
   return {status:unavailable?"out_of_stock":available?"in_stock":flag,quantity:null,quantityKind:"unknown",lowerBound:null,message:msg};
