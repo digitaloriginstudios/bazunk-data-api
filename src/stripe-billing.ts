@@ -62,14 +62,15 @@ export async function processStripeWebhook(payload:Buffer, signature:string) {
   if(event.type!=="checkout.session.completed" && event.type!=="checkout.session.async_payment_succeeded") return {handled:false};
   const session=event.data.object as Stripe.Checkout.Session;
   if(session.payment_status!=="paid" || session.mode!=="payment") return {handled:false};
-  const saved=await db.query<{client_id:string;credits:string;amount_cents:number;status:string;currency:string}>(
-    "SELECT client_id,credits::text,amount_cents,status,currency FROM api_credit_checkouts WHERE session_id=$1",[session.id]);
+  const saved=await db.query<{client_id:string;credits:string;amount_cents:number;status:string;currency:string;package_id:string}>(
+    "SELECT client_id,credits::text,amount_cents,status,currency,package_id FROM api_credit_checkouts WHERE session_id=$1",[session.id]);
   const row=saved.rows[0];
   if(!row) throw new Error("Unknown checkout session");
   if(row.client_id!==session.client_reference_id || session.amount_total!==row.amount_cents ||
      session.currency?.toLowerCase()!==row.currency || session.metadata?.service!=="bazunk-data-platform" ||
-     session.metadata?.clientId!==row.client_id) throw new Error("Checkout verification mismatch");
+     session.metadata?.clientId!==row.client_id || session.metadata?.packageId!==row.package_id || row.status==="refunded") throw new Error("Checkout verification mismatch");
   // The wallet operation key makes duplicate deliveries and concurrent webhook retries idempotent.
+  if(!Number.isSafeInteger(Number(row.credits)) || Number(row.credits)<=0) throw new Error("Invalid recorded credit quantity");
   const result=await grantApiCredits(row.client_id,Number(row.credits),`stripe:checkout:${session.id}`,"stripe_payment");
   await db.query("UPDATE api_credit_checkouts SET status='paid',paid_at=COALESCE(paid_at,now()) WHERE session_id=$1",[session.id]);
   await db.query("INSERT INTO api_credit_stripe_events(event_id,event_type) VALUES($1,$2) ON CONFLICT DO NOTHING",[event.id,event.type]);
