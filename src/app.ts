@@ -23,9 +23,10 @@ const providerSchema = z.enum(providerNames);
 export async function buildApp() {
   const app = Fastify({ logger: true });
   app.decorateRequest("apiClient", null);
+  app.removeContentTypeParser("application/json");
   app.addContentTypeParser("application/json", {parseAs:"buffer"}, (request,body,done) => {
     if(request.url.startsWith("/web/billing/stripe-webhook")) return done(null,body);
-    try { done(null,JSON.parse(body.toString("utf8"))); } catch(error) { done(error as Error,undefined); }
+    try { done(null,JSON.parse(body.toString("utf8"))); } catch { const error:any=new Error("Invalid JSON body");error.statusCode=400;done(error,undefined); }
   });
 
   await app.register(cors, { origin: config.corsOrigins.length ? config.corsOrigins : false });
@@ -37,7 +38,7 @@ export async function buildApp() {
     const signature=request.headers["stripe-signature"];
     if(typeof signature!=="string" || !Buffer.isBuffer(request.body)) return reply.code(400).send({error:"invalid_webhook"});
     try { return await processStripeWebhook(request.body,signature); }
-    catch(error) {request.log.error(error);return reply.code(400).send({error:"webhook_verification_failed"});}
+    catch(error:any) {request.log.error(error);const invalid=error?.type==="StripeSignatureVerificationError" || /Unknown checkout session|Checkout verification mismatch|Invalid recorded credit quantity/.test(String(error?.message));return reply.code(invalid?400:500).send({error:invalid?"webhook_verification_failed":"webhook_processing_failed"});}
   });
 
   const clerk=config.CLERK_SECRET_KEY?createClerkClient({secretKey:config.CLERK_SECRET_KEY}):null;
