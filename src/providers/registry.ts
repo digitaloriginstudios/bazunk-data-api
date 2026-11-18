@@ -25,6 +25,17 @@ export function getProvider(name: ProviderName): ProductProvider {
   return provider;
 }
 
+export const PROVIDER_PRIORITY = ["amazon","aliexpress","shopify","ebay","walmart"] as const;
+const providerHealth = new Map<ProviderName,{successes:number;failures:number;lastSuccessAt:string|null;lastFailureAt:string|null}>();
+export function recordProviderHealth(name:ProviderName,success:boolean){
+ const h=providerHealth.get(name)??{successes:0,failures:0,lastSuccessAt:null,lastFailureAt:null};
+ if(success){h.successes++;h.lastSuccessAt=new Date().toISOString();}else{h.failures++;h.lastFailureAt=new Date().toISOString();}
+ providerHealth.set(name,h);
+}
+export function sourceManagementStatus(){return PROVIDER_PRIORITY.map((name,priority)=>{
+ const provider=getProvider(name);const h=providerHealth.get(name);
+ return {provider:name,priority:priority+1,configured:provider.isConfigured(),health:h?{...h,status:h.lastFailureAt&&(!h.lastSuccessAt||h.lastFailureAt>h.lastSuccessAt)?"degraded":"observed_healthy"}:{status:"unobserved",successes:0,failures:0,lastSuccessAt:null,lastFailureAt:null},fallbackEligible:false};
+});}
 export function providerStatus() {
   return [...providers.values()].map((provider) => ({
     provider: provider.name,
