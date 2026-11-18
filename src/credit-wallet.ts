@@ -86,3 +86,17 @@ export async function getApiCreditBalance(clientId: string) {
   const result = await db.query<{balance:string}>("SELECT balance::text FROM api_credit_wallets WHERE client_id=$1",[clientId]);
   return result.rows[0]?.balance ?? "0";
 }
+
+/** Paginated immutable credit activity for the authenticated owner only. */
+export async function listApiCreditLedger(clientId:string,limit=25,before?:string) {
+  if(!db) throw new Error("Credit wallet requires DATABASE_URL");
+  if(!Number.isInteger(limit)||limit<1||limit>100) throw new Error("Invalid page size");
+  const result=await db.query(
+    `SELECT id,delta::text AS delta,reason,created_at
+       FROM api_credit_ledger
+      WHERE client_id=$1 AND ($2::timestamptz IS NULL OR created_at<$2::timestamptz)
+      ORDER BY created_at DESC,id DESC LIMIT $3`,
+    [clientId,before??null,limit]
+  );
+  return result.rows;
+}
