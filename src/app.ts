@@ -1,6 +1,9 @@
 import { beginAliExpressAuthorization, completeAliExpressAuthorization, aliexpressAuthorizationStatus } from "./aliexpress-oauth.js";
 import { officialConfigured, officialSearch, officialSearchDiagnostics, officialCompareSearches, officialRepeatSearchDiagnostic, officialSearchParameterProbe, officialProduct } from "./providers/aliexpress/official-api.js";
 import Fastify from "fastify";
+import { createCreditCheckout, processStripeWebhook, stripeCheckoutEnabled } from "./stripe-billing.js";
+import { CREDIT_PACKAGES } from "./commercial-pricing.js";
+import { getApiCreditBalance } from "./credit-wallet.js";
 import { IMPORTER_PACKAGES, EXTRA_REQUEST_USD_CENTS, IMPORTER_CHECKOUT_ENABLED } from "./importer-packages.js";
 import { DEFAULT_MARKUP_BPS, MIN_MARKUP_BPS, MINIMUM_SPREAD_MICRO_USD } from "./importer-pricing.js";
 import cors from "@fastify/cors";
@@ -20,13 +23,39 @@ const providerSchema = z.enum(providerNames);
 export async function buildApp() {
   const app = Fastify({ logger: true });
   app.decorateRequest("apiClient", null);
+  app.addContentTypeParser("application/json", {parseAs:"buffer"}, (request,body,done) => {
+    if(request.url.startsWith("/web/billing/stripe-webhook")) return done(null,body);
+    try { done(null,JSON.parse(body.toString("utf8"))); } catch(error) { done(error as Error,undefined); }
+  });
 
   await app.register(cors, { origin: config.corsOrigins.length ? config.corsOrigins : false });
   await app.register(rateLimit, { max: 10000, timeWindow: config.DEFAULT_RATE_WINDOW }); // coarse abuse ceiling; authenticated API limits are enforced per client in requireApiKey
 
   app.get("/", async () => ({ name: "Bazunk Data API", version: "v1", status: "ok" }));
+  app.post("/web/billing/stripe-webhook",async(request:any,reply)=>{
+    if(!stripeCheckoutEnabled()) return reply.code(503).send({error:"checkout_disabled"});
+    const signature=request.headers["stripe-signature"];
+    if(typeof signature!=="string" || !Buffer.isBuffer(request.body)) return reply.code(400).send({error:"invalid_webhook"});
+    try { return await processStripeWebhook(request.body,signature); }
+    catch(error) {request.log.error(error);return reply.code(400).send({error:"webhook_verification_failed"});}
+  });
+
   const clerk=config.CLERK_SECRET_KEY?createClerkClient({secretKey:config.CLERK_SECRET_KEY}):null;
   async function webClient(request:any,reply:any){if(!clerk)return reply.code(503).send({error:"web_auth_unavailable",message:"Authentication service is not configured."});const auth=request.headers.authorization;if(!auth?.startsWith("Bearer "))return reply.code(401).send({error:"unauthorized",message:"Sign in is required."});try{const claims=await verifyToken(auth.slice(7),{secretKey:config.CLERK_SECRET_KEY!});const user=await clerk.users.getUser(claims.sub);const primary=user.primaryEmailAddress;const email=primary?.emailAddress??user.emailAddresses[0]?.emailAddress??"Bazunk developer";const verified=primary?.verification?.status==="verified";const client=await getOrCreateClerkClient(claims.sub,email,verified);request.webClient=client;request.webIdentity={email,verified};}catch{return reply.code(401).send({error:"unauthorized",message:"Your session could not be verified."});}}
+
+  app.get("/web/billing/packages",async()=>({enabled:stripeCheckoutEnabled(),currency:"usd",packages:CREDIT_PACKAGES}));
+  app.get("/web/billing/wallet",{preHandler:webClient},async(request:any)=>({balance:await getApiCreditBalance(request.webClient.id)}));
+  app.post("/web/billing/checkout",{preHandler:webClient},async(request:any,reply)=>{
+    if(!stripeCheckoutEnabled()) return reply.code(503).send({error:"checkout_disabled"});
+    if(!request.webIdentity?.verified) return reply.code(403).send({error:"verified_email_required"});
+    const parsed=z.object({packageId:z.enum(["starter","growth","scale"])}).safeParse(request.body);
+    if(!parsed.success) return reply.code(400).send({error:"invalid_package"});
+    try {
+      const origin=process.env.DATA_PLATFORM_CHECKOUT_ORIGIN??"https://data.bazunk.com";
+      return await createCreditCheckout(request.webClient.id,parsed.data.packageId,
+        origin+"/#billing-success",origin+"/#billing-cancel");
+    } catch(error){request.log.error(error);return reply.code(503).send({error:"checkout_unavailable"});}
+  });
   async function internalAdmin(request:any,reply:any){const auth=request.headers.authorization;if(!auth?.startsWith("Bearer "))return reply.code(401).send({error:"unauthorized",message:"Bazunk Admin authentication is required."});try{const r=await fetch("https://bazunk-api.onrender.com/api/admin/settings",{headers:{Authorization:auth},signal:AbortSignal.timeout(10000)});if(!r.ok)return reply.code(401).send({error:"unauthorized",message:"Bazunk Admin session is invalid or expired."});request.webClient={id:"bazunk-admin",name:"Bazunk Admin",plan:"internal"};}catch{return reply.code(502).send({error:"admin_auth_unavailable",message:"Bazunk Admin authentication is temporarily unavailable."})}}
   app.post("/web/admin/login",async(request:any,reply)=>{const b=z.object({email:z.string().email(),password:z.string().min(1)}).safeParse(request.body??{});if(!b.success)return reply.code(400).send({error:"invalid_request"});try{const r=await fetch("https://bazunk-api.onrender.com/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(b.data),signal:AbortSignal.timeout(12000)});if(!r.ok)return reply.code(401).send({error:"invalid_credentials",message:"Invalid Bazunk admin email or password."});const data:any=await r.json();if(typeof data.token!=="string"||!data.token)return reply.code(502).send({error:"admin_auth_failed"});return{token:data.token,expiresIn:86400}}catch{return reply.code(502).send({error:"admin_auth_unavailable",message:"Bazunk Admin authentication is temporarily unavailable."})}});
   app.get("/web/admin/session",{preHandler:internalAdmin},async()=>({ok:true}));
