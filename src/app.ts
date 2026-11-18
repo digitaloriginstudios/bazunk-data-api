@@ -3,7 +3,7 @@ import { officialConfigured, officialSearch, officialSearchDiagnostics, official
 import Fastify from "fastify";
 import { createCreditCheckout, processStripeWebhook, stripeCheckoutEnabled } from "./stripe-billing.js";
 import { CREDIT_PACKAGES } from "./commercial-pricing.js";
-import { getApiCreditBalance } from "./credit-wallet.js";
+import { getApiCreditBalance, listApiCreditLedger } from "./credit-wallet.js";
 import { IMPORTER_PACKAGES, EXTRA_REQUEST_USD_CENTS, IMPORTER_CHECKOUT_ENABLED } from "./importer-packages.js";
 import { DEFAULT_MARKUP_BPS, MIN_MARKUP_BPS, MINIMUM_SPREAD_MICRO_USD } from "./importer-pricing.js";
 import cors from "@fastify/cors";
@@ -45,6 +45,12 @@ export async function buildApp() {
 
   app.get("/web/billing/packages",async()=>({enabled:stripeCheckoutEnabled(),currency:"usd",packages:CREDIT_PACKAGES}));
   app.get("/web/billing/wallet",{preHandler:webClient},async(request:any)=>({balance:await getApiCreditBalance(request.webClient.id)}));
+  app.get("/web/billing/transactions",{preHandler:webClient},async(request:any,reply)=>{
+    const parsed=z.object({limit:z.coerce.number().int().min(1).max(100).default(25),
+      before:z.string().datetime({offset:true}).optional()}).safeParse(request.query??{});
+    if(!parsed.success) return reply.code(400).send({error:"invalid_pagination"});
+    return {transactions:await listApiCreditLedger(request.webClient.id,parsed.data.limit,parsed.data.before)};
+  });
   app.post("/web/billing/checkout",{preHandler:webClient},async(request:any,reply)=>{
     if(!stripeCheckoutEnabled()) return reply.code(503).send({error:"checkout_disabled"});
     if(!request.webIdentity?.verified) return reply.code(403).send({error:"verified_email_required"});
