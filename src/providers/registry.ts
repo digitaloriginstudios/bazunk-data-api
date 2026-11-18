@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { db } from "../db.js";
 import { AmazonProvider } from "./amazon/amazon-provider.js";
 import { AmazonHttpSource } from "./amazon/http-source.js";
 import { amazonNormalizer } from "./amazon/amazon-normalizer.js";
@@ -31,6 +32,7 @@ export function recordProviderHealth(name:ProviderName,success:boolean){
  const h=providerHealth.get(name)??{successes:0,failures:0,lastSuccessAt:null,lastFailureAt:null};
  if(success){h.successes++;h.lastSuccessAt=new Date().toISOString();}else{h.failures++;h.lastFailureAt=new Date().toISOString();}
  providerHealth.set(name,h);
+ if(db)void db.query("INSERT INTO operational_events(category,provider,outcome) VALUES($1,$2,$3)",["provider",name,success?"success":"failure"]).catch(()=>{});
 }
 export function sourceManagementStatus(){return PROVIDER_PRIORITY.map((name,priority)=>{
  const provider=getProvider(name);const h=providerHealth.get(name);

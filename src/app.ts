@@ -11,6 +11,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { z } from "zod";
 import { config } from "./config.js";
+import { db as awaitableDb } from "./db.js";
 import { requireApiKey, requireScope } from "./auth.js";
 import { productCache } from "./cache.js";
 import { getProvider, providerStatus, recordProviderHealth, sourceManagementStatus } from "./providers/registry.js";
@@ -152,6 +153,15 @@ export async function buildApp() {
   app.patch("/web/admin/tickets/:id",{preHandler:internalAdmin},async(request:any,reply)=>{const p=z.object({id:z.string().uuid()}).safeParse(request.params),b=z.object({status:z.enum(["open","in_progress","resolved","closed"]).optional(),reply:z.string().trim().max(10000).optional()}).safeParse(request.body??{});if(!p.success||!b.success)return reply.code(400).send({error:"invalid_request"});const database=(await import("./db.js")).db;if(!database)return reply.code(503).send({error:"database_unavailable"});const r=await database.query("UPDATE support_tickets SET status=COALESCE($2,status),admin_reply=COALESCE($3,admin_reply),updated_at=now() WHERE id=$1 RETURNING id,status,admin_reply,updated_at",[p.data.id,b.data.status??null,b.data.reply??null]);return r.rowCount?{ticket:r.rows[0]}:reply.code(404).send({error:"not_found"});});
   app.get("/web/admin/overview",{preHandler:internalAdmin},async(request:any,reply)=>{const client=request.webClient;const clients=await listClients();const database=(await import("./db.js")).db;if(!database)return reply.code(503).send({error:"database_unavailable"});const settings=await database.query("SELECT default_currency FROM platform_settings WHERE id=1");const plans=await database.query("SELECT plan,monthly_quota,rate_limit_per_minute,prices,active FROM billing_plans ORDER BY plan");return{stats:{customers:clients.filter((x:any)=>x.plan!=="internal").length,activeCustomers:clients.filter((x:any)=>x.plan!=="internal"&&x.active).length,developer:clients.filter((x:any)=>x.plan==="developer").length,commercial:clients.filter((x:any)=>x.plan==="commercial").length},clients,providers:providerStatus(),plans:plans.rows,settings:{defaultCurrency:settings.rows[0]?.default_currency??"GBP",supportedCurrencies:["GBP","USD","EUR","AUD","CAD"]}};});
   app.get("/web/admin/usage",{preHandler:internalAdmin},async(request:any,reply)=>{return await adminUsageSummary();});
+  app.get("/web/admin/metrics",{preHandler:internalAdmin},async(_request,reply)=>{
+    const database=(await import("./db.js")).db;
+    if(!database)return reply.code(503).send({error:"database_unavailable"});
+    const [http,providers]=await Promise.all([
+      database.query("SELECT date_trunc('hour',created_at) AS hour,status_code,count(*)::int AS requests FROM operational_events WHERE category='http_error' AND created_at>now()-interval '24 hours' GROUP BY 1,2 ORDER BY 1 DESC,2"),
+      database.query("SELECT provider,outcome,count(*)::int AS requests,max(created_at) AS last_observed_at FROM operational_events WHERE category='provider' AND created_at>now()-interval '24 hours' GROUP BY 1,2 ORDER BY 1,2")
+    ]);
+    return {windowHours:24,httpErrors:http.rows,providers:providers.rows,checkedAt:new Date().toISOString()};
+  });
   app.get("/web/admin/health",{preHandler:internalAdmin},async(request:any,reply)=>{const started=Date.now();const database=(await import("./db.js")).db;let databaseStatus="unavailable",databaseMs:number|null=null;try{if(database){const t=Date.now();await database.query("SELECT 1");databaseMs=Date.now()-t;databaseStatus="online"}}catch{databaseStatus="error"}return{api:"online",apiUptimeSeconds:Math.round(process.uptime()),database:databaseStatus,databaseMs,providers:providerStatus(),checkedAt:new Date().toISOString(),responseMs:Date.now()-started};});
   app.patch("/web/admin/settings",{preHandler:internalAdmin},async(request:any,reply)=>{const admin=request.webClient;const b=z.object({defaultCurrency:z.enum(["GBP","USD","EUR","AUD","CAD"])}).safeParse(request.body??{});if(!b.success)return reply.code(400).send({error:"invalid_request"});const database=(await import("./db.js")).db;if(!database)return reply.code(503).send({error:"database_unavailable"});const r=await database.query("UPDATE platform_settings SET default_currency=$1,updated_at=now() WHERE id=1 RETURNING default_currency",[b.data.defaultCurrency]);return{settings:{defaultCurrency:r.rows[0].default_currency,supportedCurrencies:["GBP","USD","EUR","AUD","CAD"]}};});
   app.patch("/web/admin/plans/:plan",{preHandler:internalAdmin},async(request:any,reply)=>{const admin=request.webClient;const p=z.object({plan:z.enum(["developer","commercial"])}).safeParse(request.params),b=z.object({monthlyQuota:z.number().int().min(0).max(100000000),rateLimitPerMinute:z.number().int().min(1).max(10000),prices:z.object({GBP:z.number().min(0),USD:z.number().min(0),EUR:z.number().min(0),AUD:z.number().min(0),CAD:z.number().min(0)}),active:z.boolean().default(true)}).safeParse(request.body??{});if(!p.success||!b.success)return reply.code(400).send({error:"invalid_request"});const database=(await import("./db.js")).db;if(!database)return reply.code(503).send({error:"database_unavailable"});const r=await database.query("UPDATE billing_plans SET monthly_quota=$2,rate_limit_per_minute=$3,prices=$4::jsonb,active=$5,updated_at=now() WHERE plan=$1 RETURNING plan,monthly_quota,rate_limit_per_minute,prices,active",[p.data.plan,b.data.monthlyQuota,b.data.rateLimitPerMinute,JSON.stringify(b.data.prices),b.data.active]);return{plan:r.rows[0]};});
@@ -283,7 +293,7 @@ export async function buildApp() {
 
       let product:NormalizedProduct|null;
       try { product = await provider.getProduct(p.externalId); }
-      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
+      catch(error) {recordProviderHealth(p.provider,false);request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       if (!product) return reply.code(404).send({ error: "not_found" });
       recordProviderHealth(p.provider,true);
       productCache.set(cacheKey, product);
@@ -291,6 +301,13 @@ export async function buildApp() {
     });
   }, { prefix: "/v1" });
 
+  app.addHook("onResponse",(request,reply,done)=>{
+    if(reply.statusCode>=500){
+      const database=(awaitableDb);
+      if(database)void database.query("INSERT INTO operational_events(category,outcome,status_code,duration_ms) VALUES('http_error','failure',$1,$2)",[reply.statusCode,Math.max(0,Math.round(reply.elapsedTime))]).catch(()=>{});
+    }
+    done();
+  });
   app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);
     reply.code(500).send({ error: "internal_error", message: "The request could not be completed." });

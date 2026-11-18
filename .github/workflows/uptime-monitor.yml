@@ -1,0 +1,24 @@
+name: Production uptime monitor
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  uptime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify liveness and database readiness
+        run: |
+          set -euo pipefail
+          for path in health ready; do
+            for attempt in 1 2 3; do
+              if curl --fail --silent --show-error --max-time 15 "https://bazunkdata-api-2avb.onrender.com/$path" >/dev/null; then
+                echo "$path passed"; break
+              fi
+              if [ "$attempt" -eq 3 ]; then echo "::error::$path failed after three attempts"; exit 1; fi
+              sleep 5
+            done
+          done
