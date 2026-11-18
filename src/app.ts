@@ -176,6 +176,14 @@ export async function buildApp() {
     return product ?? reply.code(404).send({error:"product_not_found"});
   });
 
+  app.get("/ready",async(_request,reply)=>{
+    const database=(await import("./db.js")).db;
+    if(!database)return reply.code(503).send({status:"not_ready",database:"unconfigured"});
+    try{
+      await Promise.race([database.query("SELECT 1"),new Promise((_,reject)=>setTimeout(()=>reject(new Error("timeout")),3000))]);
+      return {status:"ready",database:"connected",checkedAt:new Date().toISOString()};
+    }catch{return reply.code(503).send({status:"not_ready",database:"unavailable"});}
+  });
   app.get("/health", async () => ({
     status: "ok", providers: providerStatus(), timestamp: new Date().toISOString()
   }));
