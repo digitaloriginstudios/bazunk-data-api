@@ -1,10 +1,12 @@
 import { buildApp } from "./app.js";
+import { migrateCreditWallet } from "./credit-wallet.js";
 import { config } from "./config.js";
 import { migrateDatabase, bootstrapInternalClient, db } from "./db.js";
 import { getProvider } from "./providers/registry.js";
 
 try {
   await migrateDatabase();
+  if (db) await migrateCreditWallet();
   await bootstrapInternalClient();
   const app = await buildApp();
   await app.listen({ port: config.PORT, host: config.HOST });
