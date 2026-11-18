@@ -61,9 +61,9 @@ async function mutate(clientId: string, delta: number, operationKey: string, rea
     await client.query("INSERT INTO api_credit_wallets(client_id) VALUES($1) ON CONFLICT DO NOTHING", [clientId]);
     // Lock wallet before checking idempotency, ensuring concurrent retries serialize.
     const wallet = await client.query<{balance:string}>("SELECT balance::text FROM api_credit_wallets WHERE client_id=$1 FOR UPDATE", [clientId]);
-    const previous = await client.query<{delta:string}>("SELECT delta::text FROM api_credit_ledger WHERE client_id=$1 AND operation_key=$2", [clientId, operationKey]);
+    const previous = await client.query<{delta:string;reason:string}>("SELECT delta::text,reason FROM api_credit_ledger WHERE client_id=$1 AND operation_key=$2", [clientId, operationKey]);
     if (previous.rowCount) {
-      if (BigInt(previous.rows[0].delta) !== BigInt(delta)) throw new Error("Operation key reused with different amount");
+      if (BigInt(previous.rows[0].delta) !== BigInt(delta) || previous.rows[0].reason !== reason) throw new Error("Operation key reused with different amount or reason");
       await client.query("COMMIT");
       return {balance: wallet.rows[0].balance, applied: false};
     }
