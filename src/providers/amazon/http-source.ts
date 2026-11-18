@@ -8,7 +8,7 @@ export class AmazonHttpSource implements AmazonDataSource {
   if(!this.isConfigured())throw new Error("Amazon source is not configured");
   const url=new URL(path,config.AMAZON_SOURCE_URL);for(const[k,v]of Object.entries(params))url.searchParams.set(k,v);
   const headers:Record<string,string>={accept:"application/json"};if(config.AMAZON_SOURCE_TOKEN)headers.authorization=`Bearer ${config.AMAZON_SOURCE_TOKEN}`;
-  const r=await fetch(url,{headers});if(r.status===404)return null;if(!r.ok)throw new Error(`Amazon source HTTP ${r.status}`);return r.json();
+  const r=await fetch(url,{headers,redirect:"error",signal:AbortSignal.timeout(12000)});if(r.status===404)return null;if(!r.ok)throw new Error(`Amazon source HTTP ${r.status}`);const length=Number(r.headers.get("content-length")??0);if(length>2_000_000)throw new Error("Amazon source response too large");const body=await r.text();if(body.length>2_000_000)throw new Error("Amazon source response too large");return JSON.parse(body);
  }
  search(o:SearchOptions){return this.call("search",{q:o.query,page:String(o.page??1),country:o.country??"GB",currency:o.currency??"GBP"});}
  getProduct(id:string,country="GB"){return this.call("products/"+encodeURIComponent(id),{country});}
