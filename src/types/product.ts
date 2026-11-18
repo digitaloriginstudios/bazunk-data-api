@@ -32,6 +32,7 @@ export interface NormalizedProduct {
   features: string[];
   variants: ProductVariant[];
   availability?: "in_stock" | "out_of_stock" | "unknown";
+  stock?: import("../stock-intelligence.js").StockIntelligence;
   rating?: number;
   reviewCount?: number;
   retrievedAt: string;

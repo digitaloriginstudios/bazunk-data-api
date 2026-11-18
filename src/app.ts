@@ -1,6 +1,7 @@
 import { beginAliExpressAuthorization, completeAliExpressAuthorization, aliexpressAuthorizationStatus } from "./aliexpress-oauth.js";
 import { officialConfigured, officialSearch, officialSearchDiagnostics, officialCompareSearches, officialRepeatSearchDiagnostic, officialSearchParameterProbe, officialProduct } from "./providers/aliexpress/official-api.js";
 import Fastify from "fastify";
+import { amazonAsin } from "./product-lookup.js";
 import { createCreditCheckout, processStripeWebhook, stripeCheckoutEnabled } from "./stripe-billing.js";
 import { CREDIT_PACKAGES } from "./commercial-pricing.js";
 import { getApiCreditBalance, listApiCreditLedger } from "./credit-wallet.js";
@@ -204,7 +205,7 @@ export async function buildApp() {
       const parsed = z.object({
         provider: providerSchema,
         q: z.string().trim().min(1).max(200),
-        page: z.coerce.number().int().positive().default(1),
+        page: z.coerce.number().int().min(1).max(100).default(1),
         country: z.string().trim().min(2).max(3).optional(),
         currency: z.string().trim().length(3).optional(),
         store: z.string().trim().min(3).max(253).optional()
@@ -220,7 +221,9 @@ export async function buildApp() {
       recordUsage({ clientId: request.apiClient!.id, route: "/v1/products/search", provider: p.provider, timestamp: new Date().toISOString(), cacheHit: Boolean(cached) });
       if (cached) return { ...cached, meta: { cache: "hit" } };
 
-      const result = await provider.search({ query: p.q, page: p.page, country: p.country, currency: p.currency, store: p.store });
+      let result:ProductSearchResult;
+      try { result = await provider.search({ query: p.q, page: p.page, country: p.country, currency: p.currency, store: p.store }); }
+      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       productCache.set(cacheKey, result);
       return { ...result, meta: { cache: "miss" } };
     });
@@ -228,6 +231,20 @@ export async function buildApp() {
     v1.get("/woocommerce/import-preview",{preHandler:requireScope("products:read")},async(request:any,reply)=>{const parsed=z.object({url:z.string().trim().min(4).max(1000),page:z.coerce.number().int().min(1).max(20).default(1)}).safeParse(request.query);if(!parsed.success)return reply.code(400).send({error:"invalid_request"});try{const u=new URL(/^https?:\/\//i.test(parsed.data.url)?parsed.data.url:"https://"+parsed.data.url);if(u.protocol!=="https:"||u.username||u.password||u.port||!u.hostname.includes("."))throw Error("Enter a public HTTPS store URL.");const dns=await import("node:dns/promises");const addresses=await dns.lookup(u.hostname,{all:true});if(!addresses.length||addresses.some(x=>{const a=x.address.toLowerCase();if(a.includes(":"))return a==="::1"||a==="::"||a.startsWith("fc")||a.startsWith("fd")||a.startsWith("fe8")||a.startsWith("fe9")||a.startsWith("fea")||a.startsWith("feb")||a.startsWith("::ffff:");const p=a.split(".").map(Number);return p.length!==4||p[0]===10||p[0]===127||p[0]===0||p[0]>=224||p[0]===169&&p[1]===254||p[0]===172&&p[1]>=16&&p[1]<=31||p[0]===192&&p[1]===168||p[0]===100&&p[1]>=64&&p[1]<=127;}))throw Error("Private store addresses are not permitted.");const slug=u.pathname.match(/\/product\/([^/]+)/)?.[1],ep=new URL("https://"+u.hostname+"/wp-json/wc/store/v1/products");if(slug)ep.searchParams.set("slug",slug);else{ep.searchParams.set("per_page","50");ep.searchParams.set("page",String(parsed.data.page));}const r=await fetch(ep,{redirect:"error",headers:{accept:"application/json"},signal:AbortSignal.timeout(12000)});if(!r.ok)throw Error("WooCommerce Store API returned "+r.status);if(Number(r.headers.get("content-length")||0)>2000000)throw Error("Response too large");const body=await r.text();if(body.length>2000000)throw Error("Response too large");const rows=JSON.parse(body);if(!Array.isArray(rows))throw Error("Store API did not return a product list");const items=rows.slice(0,50).map((p:any)=>({provider:"woocommerce",externalId:String(p.id),sourceUrl:String(p.permalink||""),title:String(p.name||"Product"),description:String(p.description||p.short_description||"").replace(/<[^>]*>/g," ").trim(),category:String(p.categories?.[0]?.name||""),price:{amount:Number(p.prices?.price||0)/Math.pow(10,Number(p.prices?.currency_minor_unit??2)),currency:String(p.prices?.currency_code||"GBP")},images:(p.images||[]).map((x:any)=>({url:String(x.src||"")})),availability:p.is_in_stock===false?"out_of_stock":"in_stock",stockQuantity:typeof p.stock_quantity==="number"?p.stock_quantity:null}));recordUsage({clientId:request.apiClient!.id,route:"/v1/woocommerce/import-preview",timestamp:new Date().toISOString()});return{store:u.hostname,kind:slug?"product":"store",items,page:parsed.data.page};}catch(e:any){return reply.code(422).send({error:"woocommerce_url_unavailable",message:e.message||"Unable to load WooCommerce catalogue."})}});
     v1.get("/shopify/import-preview",{preHandler:requireScope("products:read")},async(request:any,reply)=>{const parsed=z.object({url:z.string().trim().min(4).max(1000)}).safeParse(request.query);if(!parsed.success)return reply.code(400).send({error:"invalid_request",message:"A Shopify store, collection or product URL is required."});try{const provider:any=getProvider("shopify");const result=await provider.browseUrl(parsed.data.url);recordUsage({clientId:request.apiClient!.id,route:"/v1/shopify/import-preview",provider:"shopify",timestamp:new Date().toISOString()});return result;}catch(e:any){return reply.code(400).send({error:"shopify_url_unavailable",message:e?.message||"The Shopify URL could not be loaded."});}});
 
+    v1.get("/products/lookup", {preHandler:requireScope("products:read")}, async(request:any,reply)=>{
+      const parsed=z.object({asin:z.string().optional(),url:z.string().optional(),country:z.string().length(2).optional()}).refine(x=>Boolean(x.asin)!==Boolean(x.url)).safeParse(request.query);
+      if(!parsed.success) return reply.code(400).send({error:"invalid_request",message:"Provide exactly one ASIN or Amazon product URL"});
+      const asin=amazonAsin(parsed.data.asin??parsed.data.url??"");
+      if(!asin) return reply.code(400).send({error:"invalid_amazon_product_identifier"});
+      const provider=getProvider("amazon");
+      if(!provider.isConfigured()) return reply.code(503).send({error:"provider_unavailable",provider:"amazon"});
+      try {
+        const product=await provider.getProduct(asin,{country:parsed.data.country});
+        if(!product) return reply.code(404).send({error:"not_found"});
+        recordUsage({clientId:request.apiClient!.id,route:"/v1/products/lookup",provider:"amazon",timestamp:new Date().toISOString()});
+        return product;
+      } catch(error){request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:"amazon"});}
+    });
     v1.get("/products/:provider/:externalId", { preHandler: requireScope("products:read") }, async (request, reply) => {
       const params = z.object({
         provider: providerSchema,
@@ -244,7 +261,9 @@ export async function buildApp() {
       recordUsage({ clientId: request.apiClient!.id, route: "/v1/products/:provider/:externalId", provider: p.provider, timestamp: new Date().toISOString(), cacheHit: Boolean(cached) });
       if (cached) return { ...cached, meta: { cache: "hit" } };
 
-      const product = await provider.getProduct(p.externalId);
+      let product:NormalizedProduct|null;
+      try { product = await provider.getProduct(p.externalId); }
+      catch(error) {request.log.error(error);return reply.code(502).send({error:"upstream_provider_error",provider:p.provider});}
       if (!product) return reply.code(404).send({ error: "not_found" });
       productCache.set(cacheKey, product);
       return { ...product, meta: { cache: "miss" } };
